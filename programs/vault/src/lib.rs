@@ -142,6 +142,7 @@ pub struct Bumps {
 }
 
 #[account]
+#[derive(Debug)]
 pub struct Vault {
     pub deposited_amount: u64,
     pub withdrawn_amount: u64,

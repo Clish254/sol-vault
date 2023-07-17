@@ -93,6 +93,7 @@ describe("deposit", () => {
 
       // Check data
       const vaultData = await program.account.vault.fetch(vault);
+      console.log(vaultData);
       expect(vaultData.owner.toBase58()).to.eq(owner.toBase58());
       expect(vaultData.initialized).to.eq(true);
 
