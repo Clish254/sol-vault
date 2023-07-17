@@ -1,32 +1,26 @@
 use std::borrow::Borrow;
 
 use anchor_lang::AccountDeserialize;
-use solana_account_decoder::parse_token::get_token_account_mint;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::{
     rpc_config::{RpcAccountInfoConfig, RpcProgramAccountsConfig},
-    rpc_filter::{Memcmp, MemcmpEncodedBytes, MemcmpEncoding, RpcFilterType},
+    rpc_filter::RpcFilterType,
 };
 
-use anchor_lang::{prelude::AnchorDeserialize, AnchorSerialize};
-use solana_account_decoder::{UiAccountEncoding, UiDataSliceConfig};
-use solana_program::{
-    program::invoke_signed,
-    program_pack::{IsInitialized, Pack},
-};
+use anchor_lang::prelude::AnchorDeserialize;
+use solana_account_decoder::UiAccountEncoding;
+use solana_program::program_pack::Pack;
 
 use solana_sdk::{
     commitment_config::CommitmentConfig,
     pubkey::Pubkey,
-    signature::{read_keypair_file, Keypair, Signer},
+    signature::{read_keypair_file, Signer},
     transaction::Transaction,
 };
 use spl_associated_token_account::get_associated_token_address;
 use spl_token::state::{Account as TokenAccount, Mint as MintAccount};
 use spl_token::{instruction::transfer, ID as TOKEN_PROGRAM_ID};
 use vault::Vault;
-
-use borsh::{BorshDeserialize, BorshSerialize};
 
 #[derive(Clone, Debug)]
 pub struct VaultRecord(Vault);
@@ -57,23 +51,20 @@ impl VaultRecord {
         &self.0.owner
     }
 }
-// impl anchor_lang::Owner for VaultRecord {
-//     fn owner() -> Pubkey {
-//         let vault_program_id: Pubkey = "DpLHaRUPhCru3F8f3Aa1V8xHAxKmb9cdEqFD3E9BHRXv"
-//             .parse()
-//             .unwrap();
-//         vault_program_id
-//     }
-// }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    disburse_interest().await?;
+    Ok(())
+}
+
+async fn disburse_interest() -> Result<(), Box<dyn std::error::Error>> {
     // Set up the Solana RPC client
     let rpc_client = RpcClient::new_with_commitment(
         "https://api.devnet.solana.com".to_string(),
-        CommitmentConfig::processed(),
+        CommitmentConfig::finalized(),
     );
-    let payer = read_keypair_file(&*shellexpand::tilde("~/.config/solana/id.json"))
+    let payer = read_keypair_file(&*shellexpand::tilde("~/.config/solana/vault.json"))
         .expect("Example requires a keypair file");
     let vault_program_id: Pubkey = "DpLHaRUPhCru3F8f3Aa1V8xHAxKmb9cdEqFD3E9BHRXv".parse()?;
 
@@ -105,18 +96,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (vault_address, vault_account) in vaults {
         let deserialized_data: VaultRecord =
             VaultRecord::try_deserialize_unchecked(&mut vault_account.data.borrow())?;
-        println!("vault address {:?}", vault_address);
-        println!("vault data {:?}", deserialized_data);
         let mint = deserialized_data.mint();
-        println!("vault mint {}", &mint);
 
-        // break;
         // get vault token account where we'll send interest
-        let (vault_token_account_pda, bump) = Pubkey::find_program_address(
+        let (vault_token_account_pda, _bump) = Pubkey::find_program_address(
             &[b"tokens".as_ref(), vault_address.as_ref()],
             &vault_program_id,
         );
-        println!("vault token account {}", vault_token_account_pda);
 
         let serialized_token_account_data = rpc_client
             .get_account_data(&vault_token_account_pda)
@@ -126,38 +112,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let token_account_data =
             TokenAccount::unpack_from_slice(&serialized_token_account_data).unwrap();
 
-        println!("vault token account data {:?}", token_account_data);
-        println!("vault token account amount {:?}", token_account_data.amount);
+        let serialized_mint_account_data = rpc_client.get_account_data(mint).await.unwrap();
 
-        println!("mint account data {:?}", token_account_data);
+        let mint_account_data =
+            MintAccount::unpack_from_slice(&serialized_mint_account_data).unwrap();
+
+        let payer_is_mint_authority =
+            mint_account_data.freeze_authority == Some(payer.pubkey()).into();
 
         // transfer 1% of staked amount to the vault token account as interest
-        let interest = 1 / 100 * &token_account_data.amount;
+        if payer_is_mint_authority == true {
+            let interest = 0.01 * token_account_data.amount as f64;
 
-        let payer_associated_token_account = get_associated_token_address(&payer.pubkey(), &mint);
-        let vault_owner_associated_token_account =
-            get_associated_token_address(&deserialized_data.owner(), &mint);
-        let transfer_instruction = transfer(
-            &TOKEN_PROGRAM_ID,
-            &payer_associated_token_account,
-            &vault_owner_associated_token_account,
-            &payer.pubkey(),
-            &[&payer.pubkey()],
-            interest,
-        )
-        .unwrap();
+            let payer_associated_token_account =
+                get_associated_token_address(&payer.pubkey(), &mint);
+            let transfer_instruction = transfer(
+                &TOKEN_PROGRAM_ID,
+                &payer_associated_token_account,
+                &vault_token_account_pda,
+                &payer.pubkey(),
+                &[&payer.pubkey()],
+                interest.trunc() as u64,
+            )
+            .unwrap();
 
-        let blockhash = rpc_client.get_latest_blockhash().await?;
+            let blockhash = rpc_client.get_latest_blockhash().await?;
 
-        let tx = Transaction::new_signed_with_payer(
-            &[transfer_instruction],
-            Some(&payer.pubkey()),
-            &[&payer],
-            blockhash,
-        );
-        let sig = rpc_client.send_and_confirm_transaction(&tx).await;
+            let tx = Transaction::new_signed_with_payer(
+                &[transfer_instruction],
+                Some(&payer.pubkey()),
+                &[&payer],
+                blockhash,
+            );
+            let sig = rpc_client.send_and_confirm_transaction(&tx).await;
 
-        println!("Interest transfer signature {:?}", sig);
+            println!("Interest transfer signature {:?}", sig);
+        }
     }
 
     Ok(())

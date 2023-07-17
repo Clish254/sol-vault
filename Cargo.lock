@@ -2844,7 +2844,6 @@ name = "rust-service"
 version = "0.1.0"
 dependencies = [
  "anchor-lang",
- "borsh 0.10.3",
  "shellexpand",
  "solana-account-decoder",
  "solana-client",
