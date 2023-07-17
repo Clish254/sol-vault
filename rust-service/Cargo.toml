@@ -13,6 +13,7 @@ solana-account-decoder="1.16.4"
 solana-program="1.16.4"
 tokio = "1.14.1"
 vault = {path = "../programs/vault", features = ["no-entrypoint"] }
+spl-associated-token-account = "2.0.0"
 anchor-lang = "0.28.0"
 shellexpand = "2.1.0"
 borsh = "0.10.3"

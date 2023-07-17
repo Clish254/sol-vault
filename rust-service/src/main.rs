@@ -10,11 +10,20 @@ use solana_client::{
 
 use anchor_lang::{prelude::AnchorDeserialize, AnchorSerialize};
 use solana_account_decoder::{UiAccountEncoding, UiDataSliceConfig};
-use solana_program::program_pack::{IsInitialized, Pack};
-use solana_sdk::commitment_config::CommitmentConfig;
-use solana_sdk::pubkey::Pubkey;
-use solana_sdk::signature::{read_keypair_file, Keypair, Signer};
-use spl_token::state::Account as TokenAccount;
+use solana_program::{
+    program::invoke_signed,
+    program_pack::{IsInitialized, Pack},
+};
+
+use solana_sdk::{
+    commitment_config::CommitmentConfig,
+    pubkey::Pubkey,
+    signature::{read_keypair_file, Keypair, Signer},
+    transaction::Transaction,
+};
+use spl_associated_token_account::get_associated_token_address;
+use spl_token::state::{Account as TokenAccount, Mint as MintAccount};
+use spl_token::{instruction::transfer, ID as TOKEN_PROGRAM_ID};
 use vault::Vault;
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -42,6 +51,10 @@ impl AccountDeserialize for VaultRecord {
 impl VaultRecord {
     pub fn mint(&self) -> &Pubkey {
         &self.0.mint
+    }
+
+    pub fn owner(&self) -> &Pubkey {
+        &self.0.owner
     }
 }
 // impl anchor_lang::Owner for VaultRecord {
@@ -95,7 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("vault address {:?}", vault_address);
         println!("vault data {:?}", deserialized_data);
         let mint = deserialized_data.mint();
-        println!("vault mint {}", mint);
+        println!("vault mint {}", &mint);
 
         // break;
         // get vault token account where we'll send interest
@@ -112,11 +125,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let token_account_data =
             TokenAccount::unpack_from_slice(&serialized_token_account_data).unwrap();
+
         println!("vault token account data {:?}", token_account_data);
         println!("vault token account amount {:?}", token_account_data.amount);
 
-        let interest = 1 / 100 * &token_account_data.amount;
+        println!("mint account data {:?}", token_account_data);
+
         // transfer 1% of staked amount to the vault token account as interest
+        let interest = 1 / 100 * &token_account_data.amount;
+
+        let payer_associated_token_account = get_associated_token_address(&payer.pubkey(), &mint);
+        let vault_owner_associated_token_account =
+            get_associated_token_address(&deserialized_data.owner(), &mint);
+        let transfer_instruction = transfer(
+            &TOKEN_PROGRAM_ID,
+            &payer_associated_token_account,
+            &vault_owner_associated_token_account,
+            &payer.pubkey(),
+            &[&payer.pubkey()],
+            interest,
+        )
+        .unwrap();
+
+        let blockhash = rpc_client.get_latest_blockhash().await?;
+
+        let tx = Transaction::new_signed_with_payer(
+            &[transfer_instruction],
+            Some(&payer.pubkey()),
+            &[&payer],
+            blockhash,
+        );
+        let sig = rpc_client.send_and_confirm_transaction(&tx).await;
+
+        println!("Interest transfer signature {:?}", sig);
     }
 
     Ok(())
