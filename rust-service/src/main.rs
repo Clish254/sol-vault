@@ -118,7 +118,6 @@ async fn disburse_interest() -> Result<(), Box<dyn std::error::Error>> {
         let payer_is_mint_authority =
             mint_account_data.freeze_authority == Some(payer.pubkey()).into();
 
-        // transfer 1% of staked amount to the vault token account as interest
         if payer_is_mint_authority == true {
             let payer_associated_token_account =
                 get_associated_token_address(&payer.pubkey(), &mint);
@@ -144,15 +143,12 @@ async fn disburse_interest() -> Result<(), Box<dyn std::error::Error>> {
             let send_interest_instruction =
                 Instruction::new_with_bytes(vault_program_id, &data, accounts);
 
-            // Build the transaction
             let mut transaction =
                 Transaction::new_with_payer(&[send_interest_instruction], Some(&payer.pubkey()));
 
-            // Sign the transaction
             let blockhash = rpc_client.get_latest_blockhash().await?;
             transaction.sign(&[&payer], blockhash);
 
-            // Send the transaction to the Solana network
             let sig = rpc_client
                 .send_and_confirm_transaction(&transaction)
                 .await?;
