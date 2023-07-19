@@ -33,6 +33,7 @@ pub mod vault {
         ctx.accounts.vault.set_inner(Vault {
             deposited_amount: deposit_amount,
             withdrawn_amount: 0,
+            interest_earned: None,
             initialized: true,
             owner: ctx.accounts.owner.key(),
             mint: ctx.accounts.mint.key(),
@@ -57,7 +58,11 @@ pub mod vault {
         transfer(context, deposit_amount)?;
 
         let vault_data = &mut ctx.accounts.vault;
-        vault_data.deposited_amount += deposit_amount;
+        let updated_deposit_amount = vault_data
+            .deposited_amount
+            .checked_add(deposit_amount)
+            .unwrap();
+        vault_data.deposited_amount = updated_deposit_amount;
         Ok(())
     }
 
@@ -84,7 +89,41 @@ pub mod vault {
         )?;
 
         let vault_data = &mut ctx.accounts.vault;
-        vault_data.withdrawn_amount += withdraw_amount;
+        let updated_withdrawn_amount = vault_data
+            .withdrawn_amount
+            .checked_add(withdraw_amount)
+            .unwrap();
+        vault_data.withdrawn_amount = updated_withdrawn_amount;
+        Ok(())
+    }
+
+    pub fn send_interest(ctx: Context<Interest>) -> Result<()> {
+        let interest = 0.01 * ctx.accounts.vault_token_account.amount as f64;
+        if interest.trunc() as u64 == 0 {
+            return err!(ErrorCode::InsufficientInterestEarned);
+        }
+
+        if &ctx.accounts.sender.key == &ctx.accounts.owner.key {
+            return err!(ErrorCode::InvalidInterestSender);
+        }
+
+        msg!("Sending interest {} to vault", interest);
+        // Transfer token from the vault owner to the vault token account
+        let context = ctx.accounts.token_program_context(Transfer {
+            from: ctx.accounts.sender_token_account.to_account_info(),
+            to: ctx.accounts.vault_token_account.to_account_info(),
+            authority: ctx.accounts.sender.to_account_info(),
+        });
+        transfer(context, interest.trunc() as u64)?;
+
+        let vault_data = &mut ctx.accounts.vault;
+        match vault_data.interest_earned {
+            Some(i) => {
+                let new_interest_amount = i.checked_add(interest.trunc() as u64).unwrap();
+                vault_data.interest_earned = Some(new_interest_amount)
+            }
+            None => vault_data.interest_earned = Some(interest.trunc() as u64),
+        }
         Ok(())
     }
 }
@@ -146,6 +185,7 @@ pub struct Bumps {
 pub struct Vault {
     pub deposited_amount: u64,
     pub withdrawn_amount: u64,
+    pub interest_earned: Option<u64>,
     pub initialized: bool,
     pub owner: Pubkey,
     pub mint: Pubkey,
@@ -155,11 +195,12 @@ pub struct Vault {
 impl Vault {
     pub const LEN: usize = {
         let discriminator = 8;
-        let amounts = 2 * 8;
+        let amounts = 3 * 8;
+        let option = 1;
         let initialized = 1;
         let pubkeys = 2 * 32;
         let vault_bumps = 3 * 1;
-        discriminator + amounts + initialized + pubkeys + vault_bumps
+        discriminator + amounts + option + initialized + pubkeys + vault_bumps
     };
 }
 
@@ -253,6 +294,55 @@ impl<'info> Withdraw<'info> {
     }
 }
 
+#[derive(Accounts)]
+pub struct Interest<'info> {
+    // External accounts
+    #[account()]
+    sender: Signer<'info>,
+    #[account(mut, token::mint=vault.mint, token::authority=sender)]
+    sender_token_account: Account<'info, TokenAccount>,
+    #[account(address = vault.owner)]
+    owner: SystemAccount<'info>,
+    #[account(mut, token::mint=vault.mint, token::authority=owner)]
+    owner_token_account: Account<'info, TokenAccount>,
+    #[account(constraint = mint.is_initialized == true)]
+    mint: Account<'info, Mint>,
+
+    // PDAs
+    #[account(
+        mut,
+        seeds = [b"vault".as_ref(), owner.key().as_ref(), mint.key().as_ref()],
+        bump = vault.bumps.vault,
+        constraint = vault.initialized == true,
+    )]
+    vault: Account<'info, Vault>,
+    #[account(
+        seeds = [b"authority".as_ref(), vault.key().as_ref()],
+        bump = vault.bumps.vault_authority
+    )]
+    vault_authority: SystemAccount<'info>,
+    #[account(
+        mut,
+        token::mint=vault.mint,
+        token::authority=vault_authority,
+        seeds = [b"tokens".as_ref(), vault.key().as_ref()],
+        bump = vault.bumps.vault_token_account
+    )]
+    vault_token_account: Account<'info, TokenAccount>,
+
+    // Programs section
+    token_program: Program<'info, Token>,
+}
+
+impl<'info> Interest<'info> {
+    fn token_program_context<T: ToAccountMetas + ToAccountInfos<'info>>(
+        &self,
+        data: T,
+    ) -> CpiContext<'_, '_, '_, 'info, T> {
+        CpiContext::new(self.token_program.to_account_info(), data)
+    }
+}
+
 #[error_code]
 pub enum ErrorCode {
     #[msg("Deposit amount must be greater than 0")]
@@ -260,4 +350,10 @@ pub enum ErrorCode {
 
     #[msg("Withdraw amount must be an amount available in the vault")]
     InvalidWithdrawAmount,
+
+    #[msg("Interest should be greater than 0")]
+    InsufficientInterestEarned,
+
+    #[msg("You cannot send interest to your own vault")]
+    InvalidInterestSender,
 }
