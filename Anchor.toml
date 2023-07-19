@@ -8,7 +8,7 @@ vault = "DpLHaRUPhCru3F8f3Aa1V8xHAxKmb9cdEqFD3E9BHRXv"
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "Localnet"
+cluster = "devnet"
 wallet = "/Users/clintonilla/.config/solana/id.json"
 
 [scripts]
